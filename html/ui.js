@@ -1,115 +1,117 @@
-let currentBet = 5; // Default-Bet
+let currentBet = 5;
+
+const container     = document.getElementById("bj-container");
+const betPanel      = document.getElementById("bet-panel");
+const roundPanels   = document.getElementById("round-panels");
+const betAmountEl   = document.getElementById("bet-amount");
+const dealerCardsEl = document.getElementById("dealer-cards");
+const dealerValueEl = document.getElementById("dealer-value");
+const playerCardsEl = document.getElementById("player-cards");
+const playerValueEl = document.getElementById("player-value");
+const playerBetEl   = document.getElementById("player-bet");
+
+function clampBet(bet) {
+    if (bet < 1) return 1;
+    if (bet > 1000) return 1000;
+    return bet;
+}
+
+function updateBetLabels() {
+    const betText = `Aktueller Einsatz: $${currentBet}`;
+    if (betAmountEl) betAmountEl.textContent = betText;
+    if (playerBetEl) playerBetEl.textContent = `Einsatz: $${currentBet}`;
+}
+
+function renderCards(target, cards, revealDealer) {
+    target.innerHTML = "";
+    if (!Array.isArray(cards)) return;
+
+    cards.forEach((card, idx) => {
+        const div = document.createElement("div");
+        div.classList.add("card");
+
+        let displayCard = card;
+        if (!revealDealer && idx === 1) {
+            displayCard = "??";
+        }
+
+        if (displayCard.includes("♥") || displayCard.includes("♦")) {
+            div.classList.add("red");
+        }
+
+        div.textContent = displayCard;
+        target.appendChild(div);
+    });
+}
 
 window.addEventListener("message", function (event) {
     const data = event.data;
     if (!data || !data.action) return;
 
-    const container     = document.getElementById("bj-container");
-    const dealerCardsEl = document.getElementById("dealer-cards");
-    const dealerValueEl = document.getElementById("dealer-value");
-    const playerCardsEl = document.getElementById("player-cards");
-    const playerValueEl = document.getElementById("player-value");
-    const playerBetEl   = document.getElementById("player-bet");
-
-    // ----------------------------------------
-    // UI SCHLIESSEN
-    // ----------------------------------------
     if (data.action === "close") {
         container.classList.add("hidden");
+        betPanel.classList.add("hidden");
+        roundPanels.classList.add("hidden");
 
-        dealerCardsEl.innerHTML   = "";
-        playerCardsEl.innerHTML   = "";
+        dealerCardsEl.innerHTML = "";
+        playerCardsEl.innerHTML = "";
         dealerValueEl.textContent = "";
         playerValueEl.textContent = "";
-        playerBetEl.textContent   = "";
-
+        playerBetEl.textContent = "";
         return;
     }
 
-    // ----------------------------------------
-    // UI UPDATE
-    // ----------------------------------------
-    if (data.action === "update") {
+    if (data.action === "betLocal") {
+        if (typeof data.bet === "number") {
+            currentBet = clampBet(Math.floor(data.bet));
+            updateBetLabels();
+        }
+        return;
+    }
 
-        // Weder Runde noch Einsatzphase → UI zu
-        if (!data.inRound && !data.showUI) {
+    if (data.action === "update") {
+        const inRound  = data.inRound === true;
+        const betPhase = data.betPhase === true && !inRound;
+        const shouldShow = inRound || data.showUI === true;
+
+        if (typeof data.playerBet === "number") {
+            currentBet = clampBet(Math.floor(data.playerBet));
+        }
+
+        if (!shouldShow) {
             container.classList.add("hidden");
+            betPanel.classList.add("hidden");
+            roundPanels.classList.add("hidden");
             return;
         }
 
-        // UI anzeigen
         container.classList.remove("hidden");
+        updateBetLabels();
 
-        // Dealer-Karten
-        dealerCardsEl.innerHTML = "";
-        if (Array.isArray(data.dealerHand)) {
-            data.dealerHand.forEach((card, idx) => {
-                const div = document.createElement("div");
-                div.classList.add("card");
-
-                let displayCard = card;
-                if (!data.revealDealer && idx === 1) {
-                    displayCard = "??";
-                }
-
-                if (displayCard.includes("♥") || displayCard.includes("♦")) {
-                    div.classList.add("red");
-                }
-
-                div.textContent = displayCard;
-                dealerCardsEl.appendChild(div);
-            });
+        if (betPhase) {
+            betPanel.classList.remove("hidden");
+            roundPanels.classList.add("hidden");
+            dealerCardsEl.innerHTML = "";
+            playerCardsEl.innerHTML = "";
+            dealerValueEl.textContent = "";
+            playerValueEl.textContent = "";
+            return;
         }
+
+        betPanel.classList.add("hidden");
+        roundPanels.classList.remove("hidden");
+
+        renderCards(dealerCardsEl, data.dealerHand, data.revealDealer === true);
+        renderCards(playerCardsEl, data.playerHand, true);
 
         dealerValueEl.textContent =
-            (data.revealDealer && data.dealerValue != null)
-                ? "Wert: " + data.dealerValue
+            data.revealDealer === true && typeof data.dealerValue === "number"
+                ? `Wert: ${data.dealerValue}`
                 : "Wert: ?";
 
-        // Spieler-Karten
-        playerCardsEl.innerHTML = "";
-        if (Array.isArray(data.playerHand)) {
-            data.playerHand.forEach(card => {
-                const div = document.createElement("div");
-                div.classList.add("card");
-
-                if (card.includes("♥") || card.includes("♦")) {
-                    div.classList.add("red");
-                }
-
-                div.textContent = card;
-                playerCardsEl.appendChild(div);
-            });
-        }
-
         playerValueEl.textContent =
-            (data.playerValue != null) ? "Wert: " + data.playerValue : "";
+            typeof data.playerValue === "number" ? `Wert: ${data.playerValue}` : "";
 
-        if (data.playerBet != null) {
-            currentBet = data.playerBet;
-        }
-        playerBetEl.textContent = "Einsatz: $" + currentBet;
+        updateBetLabels();
     }
 });
-
-// Buttons unverändert
-function changeBet(amount) {
-    currentBet += amount;
-    if (currentBet < 1) currentBet = 1;
-    if (currentBet > 1000) currentBet = 1000;
-
-    const playerBetEl = document.getElementById("player-bet");
-    if (playerBetEl) {
-        playerBetEl.textContent = "Einsatz: $" + currentBet;
-    }
-}
-
-function confirmBet() {
-    fetch(`https://${GetParentResourceName()}/setBet`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json; charset=UTF-8" },
-        body: JSON.stringify({ bet: currentBet })
-    }).catch((e) => {
-        console.log("setBet error", e);
-    });
-}

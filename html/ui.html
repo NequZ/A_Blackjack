@@ -3,46 +3,45 @@
 <head>
     <meta charset="UTF-8" />
     <title>Blackjack UI</title>
-
-    <!-- WICHTIG: CSS EINBINDEN -->
     <link rel="stylesheet" href="ui.css" />
 </head>
 <body>
     <div id="bj-container" class="hidden">
-        <div class="bj-panel">
-            <h2>Dealer</h2>
-            <div id="dealer-cards" class="card-row"></div>
-            <div id="dealer-value" class="value-label"></div>
+        <div id="bet-panel" class="bj-panel hidden">
+            <div class="panel-header">
+                <span class="title">Einsatz wählen</span>
+                <span class="badge">Blackjack</span>
+            </div>
+            <div id="bet-amount" class="bet-amount">Aktueller Einsatz: $5</div>
+            <div class="bet-grid">
+                <div>↑ +5   ↓ -5</div>
+                <div>→ +1   ← -1</div>
+                <div>ENTER = Bestätigen</div>
+            </div>
+            <div class="bet-note">Nutze die Pfeiltasten, um den Einsatz einzustellen, und ENTER zum Bestätigen.</div>
         </div>
 
-        <div class="bj-panel">
-            <h2>Deine Hand</h2>
-            <div id="player-cards" class="card-row"></div>
-            <div id="player-value" class="value-label"></div>
-
-            <div id="bet-box">
-                <h3>Einsatz</h3>
-                <div id="player-bet" class="value-label">Einsatz: $5</div>
-
-                <div class="bet-buttons">
-                    <button onclick="changeBet(-10)">-10</button>
-                    <button onclick="changeBet(-5)">-5</button>
-                    <button onclick="changeBet(-1)">-1</button>
-                    <button onclick="changeBet(1)">+1</button>
-                    <button onclick="changeBet(5)">+5</button>
-                    <button onclick="changeBet(10)">+10</button>
+        <div id="round-panels" class="hidden">
+            <div class="bj-panel">
+                <div class="panel-header">
+                    <span class="title">Dealer</span>
+                    <span id="dealer-value" class="badge subtle"></span>
                 </div>
-
-                <button id="bet-confirm" onclick="confirmBet()">Einsatz setzen</button>
+                <div id="dealer-cards" class="card-row"></div>
             </div>
 
-            <div class="hint">
-                Steuerung: G = Karte ziehen, H = halten, SPACE zum Aufstehen.
+            <div class="bj-panel">
+                <div class="panel-header">
+                    <span class="title">Deine Hand</span>
+                    <span id="player-value" class="badge subtle"></span>
+                </div>
+                <div id="player-cards" class="card-row"></div>
+                <div id="player-bet" class="value-label">Einsatz: $5</div>
+                <div class="hint">G = Karte ziehen | H = halten | SPACE = Aufstehen</div>
             </div>
         </div>
     </div>
 
-    <!-- JS am Ende laden -->
     <script src="ui.js"></script>
 </body>
 </html>
