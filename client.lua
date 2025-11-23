@@ -6,18 +6,27 @@
 
 local uiVisible = false
 local inRound   = false
+local betPhase  = false
+local showUI    = false
+local currentBet = 5
 
 RegisterNetEvent("pe_blackjack:updateUI")
 AddEventHandler("pe_blackjack:updateUI", function(data)
     if not data or not data.action then return end
 
     if data.action == "update" then
-        inRound = data.inRound and true or false
+        inRound  = data.inRound and true or false
+        betPhase = (data.showUI == true) and not inRound
+        showUI   = (data.inRound == true) or (data.showUI == true)
 
-        -- UI nur zeigen, wenn Runde läuft ODER Einsatzphase aktiv ist
-        local show = (data.inRound == true) or (data.showUI == true)
+        if data.playerBet then
+            local parsed = math.floor(data.playerBet)
+            if parsed < 1 then parsed = 1 end
+            if parsed > 1000 then parsed = 1000 end
+            currentBet = parsed
+        end
 
-        if not show then
+        if not showUI then
             if uiVisible then
                 SendNUIMessage({ action = "close" })
                 SetNuiFocus(false, false)
@@ -28,28 +37,29 @@ AddEventHandler("pe_blackjack:updateUI", function(data)
 
         uiVisible = true
 
-       
-        if data.showUI and not data.inRound then
-            SetNuiFocus(false, true)   -- keyboard = false, mouse = true
+        if betPhase then
+            SetNuiFocus(false, true)   -- Maus aktiv, Tastatur bleibt fürs Spiel
         else
-            SetNuiFocus(false, false)  -- alles beim Spiel
+            SetNuiFocus(false, false)
         end
-        -- *****************
 
         SendNUIMessage({
             action       = "update",
-            inRound      = data.inRound,
-            showUI       = data.showUI,
-            playerHand   = data.playerHand,
+            inRound      = inRound,
+            showUI       = showUI,
+            betPhase     = betPhase,
+            playerHand   = data.playerHand or {},
             playerValue  = data.playerValue,
-            dealerHand   = data.dealerHand,
+            dealerHand   = data.dealerHand or {},
             dealerValue  = data.dealerValue,
             revealDealer = data.revealDealer,
-            playerBet    = data.playerBet
+            playerBet    = currentBet
         })
 
     elseif data.action == "close" then
         inRound = false
+        betPhase = false
+        showUI = false
         if uiVisible then
             SendNUIMessage({ action = "close" })
             SetNuiFocus(false, false)
@@ -67,11 +77,22 @@ RegisterNUICallback("setBet", function(data, cb)
     if cb then cb("ok") end
 end)
 
+local function updateBetDisplay()
+    SendNUIMessage({ action = "betLocal", bet = currentBet })
+end
+
+local function adjustBet(delta)
+    currentBet = math.floor(currentBet + delta)
+    if currentBet < 1 then currentBet = 1 end
+    if currentBet > 1000 then currentBet = 1000 end
+    updateBetDisplay()
+end
+
 -------------------------------------------
 -- NPC Dealer
 -------------------------------------------
 
-local dealerPed = nil
+local dealerPeds = {}
 
 local DEALER_CONFIG = {
     coords  = vector3(-5509.11, -2914.93, 1.7),
@@ -81,7 +102,7 @@ local DEALER_CONFIG = {
 
 RegisterNetEvent("pe_blackjack:spawnDealer")
 AddEventHandler("pe_blackjack:spawnDealer", function(tableId)
-    if dealerPed and DoesEntityExist(dealerPed) then
+    if dealerPeds[tableId] and DoesEntityExist(dealerPeds[tableId]) then
         return
     end
 
@@ -97,7 +118,7 @@ AddEventHandler("pe_blackjack:spawnDealer", function(tableId)
         Wait(0)
     end
 
-    dealerPed = CreatePed(
+    local dealerPed = CreatePed(
         model,
         DEALER_CONFIG.coords.x,
         DEALER_CONFIG.coords.y,
@@ -105,6 +126,8 @@ AddEventHandler("pe_blackjack:spawnDealer", function(tableId)
         DEALER_CONFIG.heading,
         false, true, true, true
     )
+
+    dealerPeds[tableId] = dealerPed
 
     SetEntityHeading(dealerPed, DEALER_CONFIG.heading)
     SetEntityCanBeDamaged(dealerPed, false)
@@ -131,6 +154,11 @@ end)
 -------------------------------------------
 
 local SEAT_KEY = 0xCEFD9220 -- INPUT_PICKUP (E)
+local BET_UP    = 0x6319DB71 -- INPUT_FRONTEND_UP
+local BET_DOWN  = 0x05CA7C52 -- INPUT_FRONTEND_DOWN
+local BET_RIGHT = 0xDEB34313 -- INPUT_FRONTEND_RIGHT
+local BET_LEFT  = 0xA65EBAB4 -- INPUT_FRONTEND_LEFT
+local BET_ENTER = 0xC7B5340A -- INPUT_FRONTEND_ACCEPT (ENTER)
 
 local BJ_SEATS = {
     {
@@ -198,22 +226,6 @@ local function SitDown(seat)
     -- Server: Blackjack beitreten
     TriggerServerEvent("pe_blackjack:seatJoin", seat.tableId)
 
-    -- >>> LOKAL: Einsatz-UI anzeigen + Mausfokus für Buttons
-    uiVisible = true
-    SendNUIMessage({
-        action       = "update",
-        inRound      = false,
-        showUI       = true,
-        playerHand   = {},
-        dealerHand   = {},
-        playerValue  = nil,
-        dealerValue  = nil,
-        playerBet    = currentBet or 5
-    })
-    -- Maus an, Tastatur bleibt im Game
-    SetNuiFocus(false, true)
-    -- <<<
-
 end
 
 
@@ -239,6 +251,8 @@ local function StandUp()
         uiVisible = false
     end
 
+    betPhase   = false
+    showUI     = false
     isSeated    = false
     currentSeat = nil
 end
@@ -255,7 +269,30 @@ CreateThread(function()
                 StandUp()
             end
 
-            if inRound then
+            if betPhase and not inRound then
+                DrawText3D(
+                    pCoords.x,
+                    pCoords.y,
+                    pCoords.z + 1.0,
+                    "Pfeile: Einsatz anpassen | ENTER bestätigen | SPACE aufstehen"
+                )
+
+                if IsControlJustPressed(0, BET_UP) then
+                    adjustBet(5)
+                end
+                if IsControlJustPressed(0, BET_DOWN) then
+                    adjustBet(-5)
+                end
+                if IsControlJustPressed(0, BET_RIGHT) then
+                    adjustBet(1)
+                end
+                if IsControlJustPressed(0, BET_LEFT) then
+                    adjustBet(-1)
+                end
+                if IsControlJustPressed(0, BET_ENTER) then
+                    TriggerServerEvent("pe_blackjack:setBet", currentBet)
+                end
+            elseif inRound then
                 DrawText3D(
                     pCoords.x,
                     pCoords.y,

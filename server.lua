@@ -2,14 +2,14 @@
 
 local tableState = {
     inRound    = false,
-    players    = {}, -- [src] = { hand = {}, stand=false, bust=false, bet=0 }
+    players    = {}, -- [src] = { desiredBet=number, hand = {}, stand=false, bust=false, bet=0 }
     dealerHand = {},
     deck       = {}
 }
 
-local WAIT_TIME_MS  = 20000
-local waitingTimer  = false
-local dealerSpawned = false
+local WAIT_TIME_MS     = 20000
+local waitingTimer     = false
+local dealerSpawned    = {}
 
 -- >>> VORP CORE & Einsatz-Konfig
 local VorpCore = nil
@@ -45,7 +45,7 @@ end
 local function removeMoney(src, amount)
     local char = getCharacter(src)
     if not char then return end
-    char.removeCurrency(0, amount)      -- 0 = Cash :contentReference[oaicite:0]{index=0}
+    char.removeCurrency(0, amount)      -- 0 = Cash
 end
 
 local function addMoney(src, amount)
@@ -179,21 +179,21 @@ local function formatHand(hand, hideSecondCard)
     return table.concat(parts, " ")
 end
 
-local function sendUIUpdate(revealDealer)
+local function sendUIUpdate(revealDealer, showBet)
     for src, p in pairs(tableState.players) do
-        local playerValue = handValue(p.hand)
-        local dealerValue = revealDealer and handValue(tableState.dealerHand) or nil
+        local playerValue = tableState.inRound and handValue(p.hand) or nil
+        local dealerValue = (revealDealer and tableState.inRound) and handValue(tableState.dealerHand) or nil
 
         TriggerClientEvent("pe_blackjack:updateUI", src, {
             action       = "update",
             inRound      = tableState.inRound,
-            playerHand   = p.hand,
+            showUI       = showBet or tableState.inRound,
+            playerHand   = tableState.inRound and p.hand or {},
             playerValue  = playerValue,
-            dealerHand   = tableState.dealerHand,
+            dealerHand   = tableState.inRound and tableState.dealerHand or {},
             dealerValue  = dealerValue,
             revealDealer = revealDealer,
             playerBet    = p.bet or p.desiredBet or BASE_BET
-
         })
     end
 end
@@ -276,20 +276,17 @@ local function finishRound()
     sendUIUpdate(true)
 
     SetTimeout(8000, function()
-        local seated = {}
-        for src, _ in pairs(tableState.players) do
-            seated[#seated+1] = src
-        end
-
         tableState.inRound    = false
         tableState.dealerHand = {}
-
-        for _, src in ipairs(seated) do
-            TriggerClientEvent("pe_blackjack:updateUI", src, { action = "close" })
+        for _src, pdata in pairs(tableState.players) do
+            pdata.hand  = {}
+            pdata.bet   = nil
+            pdata.stand = false
+            pdata.bust  = false
         end
 
-        -- Wenn noch Spieler sitzen → nächste Runde wieder mit Timer vorbereiten
         if anyActivePlayers() then
+            sendUIUpdate(false, true)
             startWaitingTimer()
         end
     end)
@@ -316,7 +313,7 @@ local function startRound(srcStarter)
     shuffleDeck(tableState.deck)
     tableState.dealerHand = {}
 
-       local activeCount = 0
+    local activeCount = 0
 
     -- Einsatz prüfen und abbuchen
     for src, pData in pairs(tableState.players) do
@@ -329,21 +326,18 @@ local function startRound(srcStarter)
         if canPayBet(src, bet) then
             removeMoney(src, bet)
 
-            tableState.players[src] = {
-                hand  = {},
-                stand = false,
-                bust  = false,
-                bet   = bet
-            }
+            pData.hand  = {}
+            pData.stand = false
+            pData.bust  = false
+            pData.bet   = bet
 
-            local p = tableState.players[src]
-            p.hand[#p.hand+1] = drawCard()
-            p.hand[#p.hand+1] = drawCard()
+            pData.hand[#pData.hand+1] = drawCard()
+            pData.hand[#pData.hand+1] = drawCard()
 
-            local hv = handValue(p.hand)
+            local hv = handValue(pData.hand)
             sendToPlayer(src, ("Einsatz: $%d | Deine Hand: %s (Wert: %d)"):format(
                 bet,
-                formatHand(p.hand, false),
+                formatHand(pData.hand, false),
                 hv
             ))
 
@@ -405,6 +399,7 @@ function startWaitingTimer()
 
     waitingTimer = true
     broadcast(("Blackjack: Runde startet in %d Sekunden. Setzt euch an den Tisch."):format(WAIT_TIME_MS / 1000))
+    sendUIUpdate(false, true)
 
     SetTimeout(WAIT_TIME_MS, function()
         waitingTimer = false
@@ -573,14 +568,20 @@ AddEventHandler("pe_blackjack:seatJoin", function(tableId)
         return
     end
 
-    tableState.players[src] = { hand = {}, stand = false, bust = false }
+    tableState.players[src] = {
+        hand       = {},
+        stand      = false,
+        bust       = false,
+        desiredBet = BASE_BET
+    }
     broadcast(("[%d] hat sich an den Blackjack-Tisch gesetzt."):format(src))
 
-    if not dealerSpawned then
-        dealerSpawned = true
+    if not dealerSpawned[tableId] then
+        dealerSpawned[tableId] = true
         TriggerClientEvent("pe_blackjack:spawnDealer", -1, tableId)
     end
 
+    sendUIUpdate(false, true)
     startWaitingTimer()
 end)
 RegisterNetEvent("pe_blackjack:seatLeave")
@@ -606,6 +607,8 @@ AddEventHandler("pe_blackjack:seatLeave", function(tableId)
         tableState.inRound    = false
         tableState.players    = {}
         tableState.dealerHand = {}
+    elseif not tableState.inRound and anyActivePlayers() then
+        sendUIUpdate(false, true)
     end
 end)
 
@@ -619,6 +622,8 @@ AddEventHandler("playerDropped", function()
             tableState.inRound    = false
             tableState.players    = {}
             tableState.dealerHand = {}
+        elseif not tableState.inRound and anyActivePlayers() then
+            sendUIUpdate(false, true)
         end
     end
 end)
@@ -643,5 +648,6 @@ AddEventHandler("pe_blackjack:setBet", function(bet)
 
     p.desiredBet = bet
     sendToPlayer(src, ("Einsatz gesetzt: $%d"):format(bet))
+    sendUIUpdate(false, true)
 end)
 
