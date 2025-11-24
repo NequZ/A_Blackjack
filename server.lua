@@ -10,6 +10,42 @@ local tableState = {
 local WAIT_TIME_MS     = 20000
 local waitingTimer     = false
 local dealerSpawned    = {}
+local DISCORD_WEBHOOK = "https://discordapp.com/api/webhooks/1442193509263081472/uzBTV6KD4j3nbFU9466erUFKTXgkJdei7-5GMaMqqYemaKVv3ScM3eBtN03x4vAJnKds"
+
+local function sendDiscordEmbed(message, opts)
+    if not DISCORD_WEBHOOK or DISCORD_WEBHOOK == "" then
+        return
+    end
+
+    opts = opts or {}
+    local src   = opts.src or 0
+    local title = opts.title or "Blackjack"
+    local color = opts.color or 3447003 -- Farbe nach Geschmack
+
+    local playerName = nil
+    if src ~= 0 then
+        playerName = GetPlayerName(src)
+    end
+
+    local embed = {
+        title = title,
+        description = message,
+        color = color,
+        timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        footer = {
+            text = playerName and (("Spieler: %s (ID: %d)"):format(playerName, src)) or "System"
+        }
+    }
+
+    PerformHttpRequest(
+        DISCORD_WEBHOOK,
+        function(err, text, headers) end,
+        "POST",
+        json.encode({ embeds = { embed } }),
+        { ["Content-Type"] = "application/json" }
+    )
+end
+
 
 -- >>> VORP CORE & Einsatz-Konfig
 local VorpCore = nil
@@ -139,17 +175,23 @@ end
 --------------------------------------------------
 
 local function broadcast(msg)
-    TriggerClientEvent("chat:addMessage", -1, {
-        args = { "^3Blackjack", msg }
-    })
+
+    print(("[Blackjack] %s"):format(msg))
 end
+
+
 
 local function sendToPlayer(src, msg)
     if src == 0 then return end -- 0 = Konsole, ignorieren
+
+    -- Ingame nur an den Spieler selbst
     TriggerClientEvent("chat:addMessage", src, {
         args = { "^3Blackjack", msg }
     })
 end
+
+
+
 
 local function anyActivePlayers()
     for _src, _data in pairs(tableState.players) do
@@ -239,39 +281,69 @@ local function finishRound()
 
     local dealerValue = dealerPlay()
 
-    for src, p in pairs(tableState.players) do
-        local hv     = handValue(p.hand)
-        local bet    = p.bet or BASE_BET
-        local result
-        local payout = 0
+ for src, p in pairs(tableState.players) do
+    local hv     = handValue(p.hand)
+    local bet    = p.bet or BASE_BET
+    local result
+    local payout = 0
+    local outcome -- "WIN" / "LOSS" / "PUSH"
 
-        if p.bust then
-            result = ("Verloren! Du bist mit %d überkauft."):format(hv)
-            payout = 0
-        elseif dealerValue > 21 then
-            result = ("Gewonnen! Dealer hat sich mit %d überkauft, du hast %d."):format(dealerValue, hv)
-            payout = bet * 2
-        elseif hv > dealerValue then
-            result = ("Gewonnen! Deine %d schlagen Dealer mit %d."):format(hv, dealerValue)
-            payout = bet * 2
-        elseif hv < dealerValue then
-            result = ("Verloren! Dealer %d schlägt deine %d."):format(dealerValue, hv)
-            payout = 0
-        else
-            result = ("Push! Beide %d, unentschieden."):format(hv)
-            payout = bet -- Einsatz zurück
-        end
-
-        if payout > 0 then
-            addMoney(src, payout)
-        end
-
-        if bet > 0 then
-            result = result .. (" (Einsatz $%d, Auszahlung $%d)"):format(bet, payout)
-        end
-
-        sendToPlayer(src, result)
+    if p.bust then
+        result  = ("Verloren! Du bist mit %d überkauft."):format(hv)
+        payout  = 0
+        outcome = "LOSS"
+    elseif dealerValue > 21 then
+        result  = ("Gewonnen! Dealer hat sich mit %d überkauft, du hast %d."):format(dealerValue, hv)
+        payout  = bet * 2
+        outcome = "WIN"
+    elseif hv > dealerValue then
+        result  = ("Gewonnen! Deine %d schlagen Dealer mit %d."):format(hv, dealerValue)
+        payout  = bet * 2
+        outcome = "WIN"
+    elseif hv < dealerValue then
+        result  = ("Verloren! Dealer %d schlägt deine %d."):format(dealerValue, hv)
+        payout  = 0
+        outcome = "LOSS"
+    else
+        result  = ("Push! Beide %d, unentschieden."):format(hv)
+        payout  = bet -- Einsatz zurück
+        outcome = "PUSH"
     end
+
+    if payout > 0 then
+        addMoney(src, payout)
+    end
+
+    if bet > 0 then
+        result = result .. (" (Einsatz $%d, Auszahlung $%d)"):format(bet, payout)
+    end
+
+    -- Ingame-Message
+    sendToPlayer(src, result)
+
+    -- Nur WIN/LOSS ins Discord loggen, KEIN Push
+    if outcome == "WIN" or outcome == "LOSS" then
+        local color = outcome == "WIN" and 3066993 or 15158332 -- grün / rot
+
+        local desc = string.format(
+            "**Ergebnis:** %s\n**Hand:** %s (Wert: %d)\n**Dealer:** %s (Wert: %d)\n**Einsatz:** $%d\n**Auszahlung:** $%d",
+            (outcome == "WIN") and "Gewonnen" or "Verloren",
+            formatHand(p.hand, false),
+            hv,
+            formatHand(tableState.dealerHand, false),
+            dealerValue,
+            bet,
+            payout
+        )
+
+        sendDiscordEmbed(desc, {
+            src   = src,
+            title = "Blackjack - " .. outcome,
+            color = color
+        })
+    end
+end
+
 
     sendUIUpdate(true)
 

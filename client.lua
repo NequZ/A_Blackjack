@@ -92,62 +92,146 @@ end
 -- NPC Dealer
 -------------------------------------------
 
-local dealerPeds = {}
+-------------------------------------------
+-- Blackjack Dealer NPCs (Auto-Spawn)
+-------------------------------------------
 
-local DEALER_CONFIG = {
-    coords  = vector3(-5509.11, -2914.93, 1.7),
-    heading = 180.0,
-    model   = `U_M_M_VALGENSTOREOWNER_01`
-}
+-------------------------------------------
+-- Blackjack Dealer NPCs (Auto-Spawn)
+-------------------------------------------
 
-RegisterNetEvent("pe_blackjack:spawnDealer")
-AddEventHandler("pe_blackjack:spawnDealer", function(tableId)
-    if dealerPeds[tableId] and DoesEntityExist(dealerPeds[tableId]) then
+local bjDealerPeds = {} -- bjDealerPeds[tableId] = ped
+
+CreateThread(function()
+    if not Config.BlackjackTables or #Config.BlackjackTables == 0 then
+        print("[pe_blackjack] WARNUNG: Keine Tische in Config.BlackjackTables definiert.")
         return
     end
 
-    local model = DEALER_CONFIG.model
-
-    if not IsModelValid(model) then
-        print("[pe_blackjack] Dealer-Modell ungültig")
-        return
+    -- Modelle vorladen
+    local models = {}
+    for _, tbl in ipairs(Config.BlackjackTables) do
+        local npcCfg = tbl.npc
+        if npcCfg and npcCfg.model then
+            local hash = GetHashKey(npcCfg.model)
+            if IsModelValid(hash) then
+                models[hash] = true
+            else
+                print(("[pe_blackjack] WARNUNG: Model '%s' ist ungültig (Tisch %s)."):format(
+                    npcCfg.model, tbl.id
+                ))
+            end
+        end
     end
 
-    RequestModel(model)
-    while not HasModelLoaded(model) do
+    for hash, _ in pairs(models) do
+        RequestModel(hash)
+    end
+
+    local allLoaded = false
+    while not allLoaded do
+        allLoaded = true
+        for hash, _ in pairs(models) do
+            if not HasModelLoaded(hash) then
+                allLoaded = false
+                break
+            end
+        end
         Wait(0)
     end
 
-    local dealerPed = CreatePed(
-        model,
-        DEALER_CONFIG.coords.x,
-        DEALER_CONFIG.coords.y,
-        DEALER_CONFIG.coords.z - 1.0,
-        DEALER_CONFIG.heading,
-        false, true, true, true
-    )
+    -- Spawn / Despawn Loop
+    while true do
+        local sleep = 1000
+        local playerPed = PlayerPedId()
+        local playerCoords = GetEntityCoords(playerPed)
 
-    dealerPeds[tableId] = dealerPed
+        for _, tbl in ipairs(Config.BlackjackTables) do
+            local npcCfg = tbl.npc
+            if npcCfg and npcCfg.coords then
+                local dist        = #(playerCoords - npcCfg.coords)
+                local spawnRadius = npcCfg.spawnRadius or 80.0
+                local tableId     = tbl.id
 
-    SetEntityHeading(dealerPed, DEALER_CONFIG.heading)
-    SetEntityCanBeDamaged(dealerPed, false)
-    SetEntityInvincible(dealerPed, true)
-    SetBlockingOfNonTemporaryEvents(dealerPed, true)
-    FreezeEntityPosition(dealerPed, true)
+                if dist <= spawnRadius then
+                    sleep = 250
 
-    local scenario = GetHashKey("WORLD_HUMAN_POKER_PLAYER")
-    TaskStartScenarioAtPosition(
-        dealerPed,
-        scenario,
-        DEALER_CONFIG.coords.x,
-        DEALER_CONFIG.coords.y,
-        DEALER_CONFIG.coords.z,
-        DEALER_CONFIG.heading,
-        -1,
-        true,
-        false
-    )
+                    if not bjDealerPeds[tableId] or not DoesEntityExist(bjDealerPeds[tableId]) then
+                        local x = npcCfg.coords.x
+                        local y = npcCfg.coords.y
+                        local z = npcCfg.coords.z  -- EXAKT aus Config, kein GroundZ
+
+                        local modelHash = GetHashKey(npcCfg.model)
+                        if not IsModelValid(modelHash) then
+                            print(("[pe_blackjack] WARNUNG: Ungültiges Model '%s' für Tisch %s."):format(
+                                tostring(npcCfg.model), tostring(tableId)
+                            ))
+                        else
+                            local ped = Citizen.InvokeNative(
+                                0xD49F9B0955C367DE,  -- CREATE_PED
+                                modelHash,
+                                x, y, z,
+                                npcCfg.heading or 0.0,
+                                false, false, false, false
+                            )
+
+                            if ped ~= 0 then
+                                Citizen.InvokeNative(0x283978A15512B2FE, ped, true) -- Outfit
+
+                                SetEntityAsMissionEntity(ped, true, false)
+                                SetEntityInvincible(ped, true)
+                                SetBlockingOfNonTemporaryEvents(ped, true)
+                                FreezeEntityPosition(ped, true)
+                                SetEntityVisible(ped, true)
+                                SetPedCanRagdoll(ped, false)
+
+                                bjDealerPeds[tableId] = ped
+                                print(("[pe_blackjack] Dealer für Tisch '%s' gespawnt."):format(tableId))
+                            else
+                                print(("[pe_blackjack] Konnte Dealer für Tisch '%s' nicht spawnen."):format(tableId))
+                            end
+                        end
+                    end
+                else
+                    -- Außerhalb Radius -> despawnen
+                    if bjDealerPeds[tableId] and DoesEntityExist(bjDealerPeds[tableId]) then
+                        DeletePed(bjDealerPeds[tableId])
+                        bjDealerPeds[tableId] = nil
+                        print(("[pe_blackjack] Dealer für Tisch '%s' despawned (außerhalb Streamingdistanz)."):format(tableId))
+                    end
+                end
+            end
+        end
+
+        Wait(sleep)
+    end
 end)
+
+
+-- BLIPs für alle Blackjack-Tische
+
+CreateThread(function()
+    if not Config.BlackjackTables then return end
+
+    for _, tbl in ipairs(Config.BlackjackTables) do
+        local npcCfg = tbl.npc
+        if npcCfg and npcCfg.coords and npcCfg.blipSprite then
+            local blip = Citizen.InvokeNative(
+                0x554D9D53F696D002, -- _BLIP_ADD_FOR_COORDS
+                npcCfg.blipSprite,
+                npcCfg.coords.x,
+                npcCfg.coords.y,
+                npcCfg.coords.z
+            )
+
+            local labelText = npcCfg.blipLabel or ("Blackjack #" .. tostring(tbl.id))
+            local label = CreateVarString(10, "LITERAL_STRING", labelText)
+            Citizen.InvokeNative(0x9CB1A1623062F402, blip, label) -- SET_BLIP_NAME
+        end
+    end
+end)
+
+
 
 -------------------------------------------
 -- Sitzsystem für Blackjack-Tisch
@@ -160,28 +244,29 @@ local BET_RIGHT = 0xDEB34313 -- INPUT_FRONTEND_RIGHT
 local BET_LEFT  = 0xA65EBAB4 -- INPUT_FRONTEND_LEFT
 local BET_ENTER = 0xC7B5340A -- INPUT_FRONTEND_ACCEPT (ENTER)
 
-local BJ_SEATS = {
-    {
-        tableId = 1,
-        coords  = vector3(-5512.2, -2914.1, 1.69),
-        heading = 90.0
-    },
-    {
-        tableId = 1,
-        coords  = vector3(-5511.44, -2912.11, 1.69),
-        heading = 0.0
-    },
-    {
-        tableId = 1,
-        coords  = vector3(-272.7, 804.0, 119.4),
-        heading = 270.0
-    },
-    {
-        tableId = 1,
-        coords  = vector3(-272.2, 804.5, 119.4),
-        heading = 180.0
-    },
-}
+local BJ_SEATS = {}
+
+CreateThread(function()
+   
+    while Config == nil or Config.BlackjackTables == nil do
+        Wait(0)
+    end
+
+    for _, tbl in ipairs(Config.BlackjackTables) do
+        if tbl.seats then
+            for _, seat in ipairs(tbl.seats) do
+                table.insert(BJ_SEATS, {
+                    tableId = tbl.id,
+                    coords  = seat.coords,
+                    heading = seat.heading or (tbl.npc and tbl.npc.heading) or 0.0
+                })
+            end
+        end
+    end
+
+    print("[pe_blackjack] Seats aus Config geladen: " .. tostring(#BJ_SEATS))
+end)
+
 
 local isSeated    = false
 local currentSeat = nil

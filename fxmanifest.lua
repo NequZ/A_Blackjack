@@ -7,11 +7,13 @@ description 'Blackjack - Pioneers Echoes'
 author 'Niclas'
 
 server_scripts {
-    'server.lua'
+    'server.lua',
+    'config.lua'
 }
 
 client_scripts {
-    'client.lua'
+    'client.lua',
+    'config.lua'
 }
 
 ui_page 'html/ui.html'
