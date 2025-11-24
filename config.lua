@@ -1,5 +1,14 @@
 Config = Config or {}
 
+Config.CardModel = "p_cardsspread01x"
+Config.CardOffsets = {
+    tableForward = 0.55,
+    dealerForward = 0.6,
+    spacing = 0.15,
+    tableHeight = 0.05,
+    handSpacing = 0.04
+}
+
 Config.BlackjackTables = {
     {
         id  = 1,

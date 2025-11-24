@@ -1,103 +1,51 @@
 -- pe_blackjack/server.lua
+-- Server-side blackjack logic with 3D state updates (no NUI)
 
-local tableState = {
-    inRound    = false,
-    players    = {}, -- [src] = { desiredBet=number, hand = {}, stand=false, bust=false, bet=0 }
-    dealerHand = {},
-    deck       = {}
-}
+local WAIT_TIME_MS = 20000
+local BASE_BET = 5
 
-local WAIT_TIME_MS     = 20000
-local waitingTimer     = false
-local dealerSpawned    = {}
 local DISCORD_WEBHOOK = "https://discordapp.com/api/webhooks/1442193509263081472/uzBTV6KD4j3nbFU9466erUFKTXgkJdei7-5GMaMqqYemaKVv3ScM3eBtN03x4vAJnKds"
 
-local function sendDiscordEmbed(message, opts)
-    if not DISCORD_WEBHOOK or DISCORD_WEBHOOK == "" then
-        return
-    end
-
-    opts = opts or {}
-    local src   = opts.src or 0
-    local title = opts.title or "Blackjack"
-    local color = opts.color or 3447003 -- Farbe nach Geschmack
-
-    local playerName = nil
-    if src ~= 0 then
-        playerName = GetPlayerName(src)
-    end
-
-    local embed = {
-        title = title,
-        description = message,
-        color = color,
-        timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-        footer = {
-            text = playerName and (("Spieler: %s (ID: %d)"):format(playerName, src)) or "System"
-        }
-    }
-
-    PerformHttpRequest(
-        DISCORD_WEBHOOK,
-        function(err, text, headers) end,
-        "POST",
-        json.encode({ embeds = { embed } }),
-        { ["Content-Type"] = "application/json" }
-    )
-end
-
-
--- >>> VORP CORE & Einsatz-Konfig
+------------------------------------------------------------
+-- VORP Core helpers
+------------------------------------------------------------
 local VorpCore = nil
 TriggerEvent("getCore", function(core)
     VorpCore = core
 end)
 
-local BASE_BET = 5 -- Einsatz pro Runde in Dollar (bar), nach Geschmack anpassen
--- VORP Character holen (kompatibel für beide Varianten)
 local function getCharacter(src)
     if not VorpCore or not VorpCore.getUser then return nil end
-
     local user = VorpCore.getUser(src)
     if not user then return nil end
-
-    -- Falls dein VORP eine Funktion liefert:
     if type(user.getUsedCharacter) == "function" then
-        return user.getUsedCharacter()   -- hier DARF man Klammern benutzen
+        return user.getUsedCharacter()
     end
-
-    -- Falls es – wie deine Fehlermeldung sagt – schon ein Table ist:
     return user.getUsedCharacter
 end
 
-
-
 local function canPayBet(src, amount)
     local char = getCharacter(src)
-    if not char then return true end -- failsafe: wenn VORP fehlt, nicht blocken
+    if not char then return true end
     return (char.money or 0) >= amount
 end
 
 local function removeMoney(src, amount)
     local char = getCharacter(src)
     if not char then return end
-    char.removeCurrency(0, amount)      -- 0 = Cash
+    char.removeCurrency(0, amount)
 end
 
 local function addMoney(src, amount)
     local char = getCharacter(src)
     if not char then return end
-    char.addCurrency(0, amount)         -- 0 = Cash
+    char.addCurrency(0, amount)
 end
 
-
---------------------------------------------------
--- Deck / Karten
---------------------------------------------------
-
-local cards = {
-    "2","3","4","5","6","7","8","9","10","J","Q","K","A"
-}
+------------------------------------------------------------
+-- Cards
+------------------------------------------------------------
+local cards = { "2","3","4","5","6","7","8","9","10","J","Q","K","A" }
 local suits = { "♠", "♥", "♦", "♣" }
 
 local function buildDeck()
@@ -158,568 +106,509 @@ local function handValue(hand)
     return total
 end
 
-local function drawCard()
-    local deck = tableState.deck
+local function drawCard(state)
+    local deck = state.deck
     if #deck == 0 then
-        tableState.deck = buildDeck()
-        shuffleDeck(tableState.deck)
-        deck = tableState.deck
+        state.deck = buildDeck()
+        shuffleDeck(state.deck)
+        deck = state.deck
     end
     local card = deck[#deck]
     deck[#deck] = nil
     return card
 end
 
---------------------------------------------------
--- Helpers
---------------------------------------------------
+------------------------------------------------------------
+-- State storage per table
+------------------------------------------------------------
+local tables = {}
+local playerTables = {}
 
+local function ensureTable(tableId)
+    if not tables[tableId] then
+        tables[tableId] = {
+            id = tableId,
+            inRound = false,
+            phase = "idle", -- idle | betting | dealing | playerTurn | dealerTurn | payout
+            players = {}, -- [src] = {seatIndex=number, hand={}, stand=false, bust=false, bet=nil, desiredBet=BASE_BET}
+            dealerHand = {},
+            deck = {},
+            turnOrder = {},
+            currentTurnIndex = 0,
+            waitingTimer = nil
+        }
+    end
+    return tables[tableId]
+end
+
+------------------------------------------------------------
+-- Discord logging
+------------------------------------------------------------
+local function sendDiscordEmbed(message, opts)
+    if not DISCORD_WEBHOOK or DISCORD_WEBHOOK == "" then
+        return
+    end
+
+    opts = opts or {}
+    local src   = opts.src or 0
+    local title = opts.title or "Blackjack"
+    local color = opts.color or 3447003
+
+    local playerName = nil
+    if src ~= 0 then
+        playerName = GetPlayerName(src)
+    end
+
+    local embed = {
+        title = title,
+        description = message,
+        color = color,
+        timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        footer = {
+            text = playerName and (("Spieler: %s (ID: %d)"):format(playerName, src)) or "System"
+        }
+    }
+
+    PerformHttpRequest(DISCORD_WEBHOOK, function() end, "POST", json.encode({ embeds = { embed } }), { ["Content-Type"] = "application/json" })
+end
+
+------------------------------------------------------------
+-- Utility
+------------------------------------------------------------
 local function broadcast(msg)
-
     print(("[Blackjack] %s"):format(msg))
 end
 
-
-
 local function sendToPlayer(src, msg)
-    if src == 0 then return end -- 0 = Konsole, ignorieren
-
-    -- Ingame nur an den Spieler selbst
-    TriggerClientEvent("chat:addMessage", src, {
-        args = { "^3Blackjack", msg }
-    })
+    if src == 0 then return end
+    TriggerClientEvent("chat:addMessage", src, { args = { "^3Blackjack", msg } })
 end
 
-
-
-
-local function anyActivePlayers()
-    for _src, _data in pairs(tableState.players) do
+local function anyActivePlayers(state)
+    for _src, _ in pairs(state.players) do
         return true
     end
     return false
 end
 
-local function allPlayersDone()
-    for _src, p in pairs(tableState.players) do
-        if not p.bust and not p.stand then
-            return false
+------------------------------------------------------------
+-- Networked state sharing
+------------------------------------------------------------
+local function buildStatePayload(state, revealDealer, targetSrc)
+    local payload = {
+        phase = state.phase,
+        currentTurn = nil,
+        dealer = {},
+        players = {},
+        playerBet = nil
+    }
+
+    if state.currentTurnIndex and state.turnOrder[state.currentTurnIndex] then
+        payload.currentTurn = state.turnOrder[state.currentTurnIndex]
+    end
+
+    if revealDealer then
+        payload.dealer.cards = state.dealerHand
+    else
+        payload.dealer.cards = {}
+        for i, card in ipairs(state.dealerHand) do
+            if i == 2 then
+                payload.dealer.cards[#payload.dealer.cards+1] = "??"
+            else
+                payload.dealer.cards[#payload.dealer.cards+1] = card
+            end
         end
     end
-    return true
-end
 
-local function formatHand(hand, hideSecondCard)
-    local parts = {}
-    for i, c in ipairs(hand) do
-        if hideSecondCard and i == 2 then
-            parts[#parts+1] = "??"
-        else
-            parts[#parts+1] = c
-        end
-    end
-    return table.concat(parts, " ")
-end
-
-local function sendUIUpdate(revealDealer, showBet)
-    for src, p in pairs(tableState.players) do
-        local playerValue = tableState.inRound and handValue(p.hand) or nil
-        local dealerValue = (revealDealer and tableState.inRound) and handValue(tableState.dealerHand) or nil
-
-        TriggerClientEvent("pe_blackjack:updateUI", src, {
-            action       = "update",
-            inRound      = tableState.inRound,
-            showUI       = showBet or tableState.inRound,
-            playerHand   = tableState.inRound and p.hand or {},
-            playerValue  = playerValue,
-            dealerHand   = tableState.inRound and tableState.dealerHand or {},
-            dealerValue  = dealerValue,
-            revealDealer = revealDealer,
-            playerBet    = p.bet or p.desiredBet or BASE_BET
+    for src, p in pairs(state.players) do
+        table.insert(payload.players, {
+            id = src,
+            seatIndex = p.seatIndex,
+            cards = p.hand,
+            status = p.bust and "bust" or (p.stand and "stand" or "active"),
+            bet = p.bet or p.desiredBet or BASE_BET
         })
+        if targetSrc and src == targetSrc then
+            payload.playerBet = p.desiredBet or BASE_BET
+        end
     end
+
+    return payload
 end
 
+local function sendStateUpdate(tableId, revealDealer)
+    local state = tables[tableId]
+    if not state then return end
 
-
---------------------------------------------------
--- Dealer Logik
---------------------------------------------------
-
-local function dealerPlay()
-    local dealerHand  = tableState.dealerHand
-    local dealerValue = handValue(dealerHand)
-
-    broadcast(("Dealer: %s (Wert: %d)"):format(formatHand(dealerHand, false), dealerValue))
-
-    while dealerValue < 17 do
-        local card = drawCard()
-        dealerHand[#dealerHand+1] = card
-        dealerValue = handValue(dealerHand)
-        broadcast(("Dealer zieht: %s → Hand: %s (Wert: %d)"):format(
-            card,
-            formatHand(dealerHand, false),
-            dealerValue
-        ))
+    for src, _ in pairs(state.players) do
+        local payload = buildStatePayload(state, revealDealer, src)
+        TriggerClientEvent("pe_blackjack:stateUpdate", src, tableId, payload)
     end
-
+end
+------------------------------------------------------------
+-- Dealer logic and resolution
+------------------------------------------------------------
+local function dealerPlay(state)
+    state.phase = "dealerTurn"
+    local dealerValue = handValue(state.dealerHand)
+    while dealerValue < 17 do
+        state.dealerHand[#state.dealerHand+1] = drawCard(state)
+        dealerValue = handValue(state.dealerHand)
+    end
     return dealerValue
 end
 
---------------------------------------------------
--- Runde beenden / auswerten
---------------------------------------------------
+local function finishRound(tableId)
+    local state = tables[tableId]
+    if not state then return end
 
-local function finishRound()
-    if not anyActivePlayers() then
-        broadcast("Keine Spieler am Tisch. Runde abgebrochen.")
-        tableState.inRound    = false
-        tableState.players    = {}
-        tableState.dealerHand = {}
+    state.phase = "dealerTurn"
+    sendStateUpdate(tableId, true)
+
+    if not anyActivePlayers(state) then
+        state.inRound = false
+        state.dealerHand = {}
+        state.turnOrder = {}
+        state.currentTurnIndex = 0
+        state.phase = "idle"
         return
     end
 
-    local dealerValue = dealerPlay()
+    local dealerValue = dealerPlay(state)
 
- for src, p in pairs(tableState.players) do
-    local hv     = handValue(p.hand)
-    local bet    = p.bet or BASE_BET
-    local result
-    local payout = 0
-    local outcome -- "WIN" / "LOSS" / "PUSH"
+    state.phase = "payout"
+    for src, p in pairs(state.players) do
+        local hv = handValue(p.hand)
+        local bet = p.bet or BASE_BET
+        local result
+        local payout = 0
+        local outcome
 
-    if p.bust then
-        result  = ("Verloren! Du bist mit %d überkauft."):format(hv)
-        payout  = 0
-        outcome = "LOSS"
-    elseif dealerValue > 21 then
-        result  = ("Gewonnen! Dealer hat sich mit %d überkauft, du hast %d."):format(dealerValue, hv)
-        payout  = bet * 2
-        outcome = "WIN"
-    elseif hv > dealerValue then
-        result  = ("Gewonnen! Deine %d schlagen Dealer mit %d."):format(hv, dealerValue)
-        payout  = bet * 2
-        outcome = "WIN"
-    elseif hv < dealerValue then
-        result  = ("Verloren! Dealer %d schlägt deine %d."):format(dealerValue, hv)
-        payout  = 0
-        outcome = "LOSS"
-    else
-        result  = ("Push! Beide %d, unentschieden."):format(hv)
-        payout  = bet -- Einsatz zurück
-        outcome = "PUSH"
-    end
-
-    if payout > 0 then
-        addMoney(src, payout)
-    end
-
-    if bet > 0 then
-        result = result .. (" (Einsatz $%d, Auszahlung $%d)"):format(bet, payout)
-    end
-
-    -- Ingame-Message
-    sendToPlayer(src, result)
-
-    -- Nur WIN/LOSS ins Discord loggen, KEIN Push
-    if outcome == "WIN" or outcome == "LOSS" then
-        local color = outcome == "WIN" and 3066993 or 15158332 -- grün / rot
-
-        local desc = string.format(
-            "**Ergebnis:** %s\n**Hand:** %s (Wert: %d)\n**Dealer:** %s (Wert: %d)\n**Einsatz:** $%d\n**Auszahlung:** $%d",
-            (outcome == "WIN") and "Gewonnen" or "Verloren",
-            formatHand(p.hand, false),
-            hv,
-            formatHand(tableState.dealerHand, false),
-            dealerValue,
-            bet,
-            payout
-        )
-
-        sendDiscordEmbed(desc, {
-            src   = src,
-            title = "Blackjack - " .. outcome,
-            color = color
-        })
-    end
-end
-
-
-    sendUIUpdate(true)
-
-    SetTimeout(8000, function()
-        tableState.inRound    = false
-        tableState.dealerHand = {}
-        for _src, pdata in pairs(tableState.players) do
-            pdata.hand  = {}
-            pdata.bet   = nil
-            pdata.stand = false
-            pdata.bust  = false
+        if p.bust then
+            result = ("Verloren! Überkauft mit %d."):format(hv)
+            payout = 0
+            outcome = "LOSS"
+        elseif dealerValue > 21 then
+            result = ("Gewonnen! Dealer überkauft (%d), du hast %d."):format(dealerValue, hv)
+            payout = bet * 2
+            outcome = "WIN"
+        elseif hv > dealerValue then
+            result = ("Gewonnen! Deine %d schlagen Dealer %d."):format(hv, dealerValue)
+            payout = bet * 2
+            outcome = "WIN"
+        elseif hv < dealerValue then
+            result = ("Verloren! Dealer %d schlägt deine %d."):format(dealerValue, hv)
+            payout = 0
+            outcome = "LOSS"
+        else
+            result = ("Push! Beide %d."):format(hv)
+            payout = bet
+            outcome = "PUSH"
         end
 
-        if anyActivePlayers() then
-            sendUIUpdate(false, true)
-            startWaitingTimer()
+        if payout > 0 then
+            addMoney(src, payout)
+        end
+
+        sendToPlayer(src, result .. (" (Einsatz $%d, Auszahlung $%d)"):format(bet, payout))
+
+        if outcome == "WIN" or outcome == "LOSS" then
+            local color = outcome == "WIN" and 3066993 or 15158332
+            local desc = string.format("**Ergebnis:** %s\n**Hand:** %s (%d)\n**Dealer:** %s (%d)\n**Einsatz:** $%d\n**Auszahlung:** $%d", outcome == "WIN" and "Gewonnen" or "Verloren", table.concat(p.hand, " "), hv, table.concat(state.dealerHand, " "), dealerValue, bet, payout)
+            sendDiscordEmbed(desc, { src = src, title = "Blackjack - " .. outcome, color = color })
+        end
+    end
+
+    sendStateUpdate(tableId, true)
+
+    SetTimeout(8000, function()
+        state.inRound = false
+        state.dealerHand = {}
+        state.turnOrder = {}
+        state.currentTurnIndex = 0
+        state.phase = anyActivePlayers(state) and "betting" or "idle"
+        for _, p in pairs(state.players) do
+            p.hand = {}
+            p.bet = nil
+            p.stand = false
+            p.bust = false
+        end
+        sendStateUpdate(tableId, false)
+        if anyActivePlayers(state) then
+            TriggerClientEvent("pe_blackjack:roundEnded", -1, tableId)
+            state.waitingTimer = nil
+            state.waitingTimer = SetTimeout(WAIT_TIME_MS, function()
+                state.waitingTimer = nil
+                if anyActivePlayers(state) and not state.inRound then
+                    startRound(tableId, 0)
+                end
+            end)
         end
     end)
 end
+------------------------------------------------------------
+-- Turn handling
+------------------------------------------------------------
+local function nextTurn(tableId)
+    local state = tables[tableId]
+    if not state then return end
 
+    local totalPlayers = #state.turnOrder
+    local startIndex = state.currentTurnIndex
 
---------------------------------------------------
--- Runde starten
---------------------------------------------------
-
-local function startRound(srcStarter)
-    if tableState.inRound then
-        sendToPlayer(srcStarter, "Es läuft bereits eine Runde.")
-        return
+    for i = 1, totalPlayers do
+        local idx = ((startIndex + i - 1) % totalPlayers) + 1
+        local src = state.turnOrder[idx]
+        local pdata = state.players[src]
+        if pdata and not pdata.bust and not pdata.stand then
+            state.currentTurnIndex = idx
+            state.phase = "playerTurn"
+            sendStateUpdate(tableId, false)
+            return
+        end
     end
 
-    if not anyActivePlayers() then
+    finishRound(tableId)
+end
+
+local function handleHit(src, tableId)
+    local state = tables[tableId]
+    if not state or not state.inRound then return end
+    if state.turnOrder[state.currentTurnIndex] ~= src then return end
+
+    local pdata = state.players[src]
+    if not pdata or pdata.bust or pdata.stand then return end
+
+    pdata.hand[#pdata.hand+1] = drawCard(state)
+    local hv = handValue(pdata.hand)
+    if hv > 21 then
+        pdata.bust = true
+        sendToPlayer(src, "Überkauft!")
+        nextTurn(tableId)
+    else
+        sendStateUpdate(tableId, false)
+    end
+end
+
+local function handleStand(src, tableId)
+    local state = tables[tableId]
+    if not state or not state.inRound then return end
+    if state.turnOrder[state.currentTurnIndex] ~= src then return end
+
+    local pdata = state.players[src]
+    if not pdata or pdata.bust or pdata.stand then return end
+
+    pdata.stand = true
+    nextTurn(tableId)
+end
+
+------------------------------------------------------------
+-- Round start
+------------------------------------------------------------
+function startRound(tableId, srcStarter)
+    local state = tables[tableId]
+    if not state then return end
+    if state.inRound then
+        sendToPlayer(srcStarter, "Runde läuft bereits.")
+        return
+    end
+    if not anyActivePlayers(state) then
         sendToPlayer(srcStarter, "Keine Spieler am Tisch.")
         return
     end
 
-    tableState.inRound    = true
-    tableState.deck       = buildDeck()
-    shuffleDeck(tableState.deck)
-    tableState.dealerHand = {}
+    state.inRound = true
+    state.phase = "dealing"
+    state.deck = buildDeck()
+    shuffleDeck(state.deck)
+    state.dealerHand = {}
+    state.turnOrder = {}
+    state.currentTurnIndex = 0
 
-    local activeCount = 0
-
-    -- Einsatz prüfen und abbuchen
-    for src, pData in pairs(tableState.players) do
-        local desired = pData.desiredBet or BASE_BET
-        local bet     = math.floor(desired)
-
-        if bet < 1 then bet = 1 end
-        if bet > 1000 then bet = 1000 end
-
+    for src, pdata in pairs(state.players) do
+        local bet = math.floor(pdata.desiredBet or BASE_BET)
+        bet = math.max(1, math.min(1000, bet))
         if canPayBet(src, bet) then
             removeMoney(src, bet)
-
-            pData.hand  = {}
-            pData.stand = false
-            pData.bust  = false
-            pData.bet   = bet
-
-            pData.hand[#pData.hand+1] = drawCard()
-            pData.hand[#pData.hand+1] = drawCard()
-
-            local hv = handValue(pData.hand)
-            sendToPlayer(src, ("Einsatz: $%d | Deine Hand: %s (Wert: %d)"):format(
-                bet,
-                formatHand(pData.hand, false),
-                hv
-            ))
-
-            activeCount = activeCount + 1
+            pdata.bet = bet
+            pdata.hand = { drawCard(state), drawCard(state) }
+            pdata.stand = false
+            pdata.bust = false
+            table.insert(state.turnOrder, src)
+            sendToPlayer(src, ("Einsatz $%d platziert."):format(bet))
         else
-            sendToPlayer(src, ("Du hast nicht genug Geld ($%d), um mitzuspielen."):format(bet))
-            tableState.players[src] = nil
+            sendToPlayer(src, ("Du hast nicht genug Geld für $%d."):format(bet))
+            state.players[src] = nil
+            playerTables[src] = nil
         end
     end
 
-
-    if activeCount == 0 then
-        broadcast("Niemand hat genug Geld, Runde wird abgebrochen.")
-        tableState.inRound    = false
-        tableState.dealerHand = {}
+    if #state.turnOrder == 0 then
+        state.inRound = false
+        state.phase = "betting"
+        sendStateUpdate(tableId, false)
         return
     end
 
-    -- Dealer
-    tableState.dealerHand[#tableState.dealerHand+1] = drawCard()
-    tableState.dealerHand[#tableState.dealerHand+1] = drawCard()
+    state.dealerHand[#state.dealerHand+1] = drawCard(state)
+    state.dealerHand[#state.dealerHand+1] = drawCard(state)
 
-    broadcast(("Dealer zeigt: %s"):format(formatHand(tableState.dealerHand, true)))
-    broadcast("Runde gestartet. G = Karte, H = halten, SPACE = aufstehen.")
+    state.phase = "playerTurn"
+    state.currentTurnIndex = 1
+    sendStateUpdate(tableId, false)
 
-    -- Blackjack-Check
-    for src, p in pairs(tableState.players) do
-        local hv = handValue(p.hand)
-        if hv == 21 then
-            sendToPlayer(src, "Blackjack!")
-            p.stand = true
+    local allBlackjack = true
+    for src, pdata in pairs(state.players) do
+        if handValue(pdata.hand) ~= 21 then
+            allBlackjack = false
+        else
+            pdata.stand = true
         end
     end
-
-    sendUIUpdate(false)
-
-    if allPlayersDone() then
-        finishRound()
+    if allBlackjack then
+        finishRound(tableId)
     end
 end
-
-
---------------------------------------------------
--- Wartetimer
---------------------------------------------------
-
---------------------------------------------------
--- Wartetimer
---------------------------------------------------
-
---------------------------------------------------
--- Wartetimer (global, damit finishRound ihn findet)
---------------------------------------------------
-
-function startWaitingTimer()
-    if waitingTimer or tableState.inRound then
+------------------------------------------------------------
+-- Waiting timer
+------------------------------------------------------------
+local function startWaitingTimer(tableId)
+    local state = ensureTable(tableId)
+    if state.waitingTimer or state.inRound then
         return
     end
-
-    waitingTimer = true
-    broadcast(("Blackjack: Runde startet in %d Sekunden. Setzt euch an den Tisch."):format(WAIT_TIME_MS / 1000))
-    sendUIUpdate(false, true)
-
-    SetTimeout(WAIT_TIME_MS, function()
-        waitingTimer = false
-
-        if not anyActivePlayers() or tableState.inRound then
-            return
+    state.phase = "betting"
+    sendStateUpdate(tableId, false)
+    state.waitingTimer = SetTimeout(WAIT_TIME_MS, function()
+        state.waitingTimer = nil
+        if anyActivePlayers(state) and not state.inRound then
+            startRound(tableId, 0)
         end
-
-        -- 0 = "System"-Starter
-        startRound(0)
     end)
 end
-
-
---------------------------------------------------
--- Events / Commands
---------------------------------------------------
-
-RegisterCommand("bjjoin", function(source)
-    if tableState.inRound then
-        sendToPlayer(source, "Runde läuft bereits, warte bis zur nächsten.")
-        return
-    end
-
-    if tableState.players[source] then
-        sendToPlayer(source, "Du bist bereits am Tisch.")
-        return
-    end
-
-    tableState.players[source] = { hand = {}, stand = false, bust = false }
-    broadcast(("[%d] ist dem Blackjack-Tisch beigetreten."):format(source))
-end, false)
-
-RegisterCommand("bjleave", function(source)
-    if not tableState.players[source] then
-        sendToPlayer(source, "Du bist nicht am Tisch.")
-        return
-    end
-
-    tableState.players[source] = nil
-    broadcast(("[%d] hat den Blackjack-Tisch verlassen."):format(source))
-
-    if tableState.inRound and not anyActivePlayers() then
-        broadcast("Alle Spieler weg, Runde abgebrochen.")
-        tableState.inRound    = false
-        tableState.players    = {}
-        tableState.dealerHand = {}
-    end
-end, false)
-
-RegisterCommand("bjstart", function(source)
-    startRound(source)
-end, false)
-
---------------------------------------------------
--- Hit / Stand Logik zentral
---------------------------------------------------
-
-local function handleHit(src)
-    if not tableState.inRound then
-        sendToPlayer(src, "Es läuft keine Runde.")
-        return
-    end
-
-    local p = tableState.players[src]
-    if not p then
-        sendToPlayer(src, "Du bist nicht am Tisch.")
-        return
-    end
-
-    if p.stand then
-        sendToPlayer(src, "Du hast bereits gehalten.")
-        return
-    end
-    if p.bust then
-        sendToPlayer(src, "Du bist schon überkauft.")
-        return
-    end
-
-    local card = drawCard()
-    p.hand[#p.hand+1] = card
-    local hv = handValue(p.hand)
-
-    sendToPlayer(src, ("Du ziehst: %s → Hand: %s (Wert: %d)"):format(
-        card,
-        formatHand(p.hand, false),
-        hv
-    ))
-
-    if hv > 21 then
-        p.bust = true
-        sendToPlayer(src, "Überkauft! (>21)")
-    end
-
-    if allPlayersDone() then
-        finishRound()
-    else
-        sendUIUpdate(false)
-    end
-end
-
-local function handleStand(src)
-    if not tableState.inRound then
-        sendToPlayer(src, "Es läuft keine Runde.")
-        return
-    end
-
-    local p = tableState.players[src]
-    if not p then
-        sendToPlayer(src, "Du bist nicht am Tisch.")
-        return
-    end
-
-    if p.stand then
-        sendToPlayer(src, "Du hast bereits gehalten.")
-        return
-    end
-
-    p.stand = true
-    sendToPlayer(src, "Du hältst.")
-
-    if allPlayersDone() then
-        finishRound()
-    else
-        sendUIUpdate(false)
-    end
-end
-
--- Commands bleiben zum Debug da
-RegisterCommand("bjhit", function(source)
-    handleHit(source)
-end, false)
-
-RegisterCommand("bjstand", function(source)
-    handleStand(source)
-end, false)
-
--- Events für Client-Tasten
-RegisterNetEvent("pe_blackjack:hit")
-AddEventHandler("pe_blackjack:hit", function()
-    local src = source
-    handleHit(src)
-end)
-
-RegisterNetEvent("pe_blackjack:stand")
-AddEventHandler("pe_blackjack:stand", function()
-    local src = source
-    handleStand(src)
-end)
-
---------------------------------------------------
--- Sitzsystem: Spieler setzt sich an Tisch
---------------------------------------------------
-
+------------------------------------------------------------
+-- Events
+------------------------------------------------------------
 RegisterNetEvent("pe_blackjack:seatJoin")
-AddEventHandler("pe_blackjack:seatJoin", function(tableId)
+AddEventHandler("pe_blackjack:seatJoin", function(tableId, seatIndex)
     local src = source
+    local state = ensureTable(tableId)
 
-    if tableState.inRound then
-        sendToPlayer(src, "Runde läuft bereits, warte bis zur nächsten.")
+    if state.players[src] then
+        sendToPlayer(src, "Du sitzt bereits.")
         return
     end
 
-    if tableState.players[src] then
-        sendToPlayer(src, "Du bist bereits am Tisch.")
+    if state.inRound then
+        sendToPlayer(src, "Warte bis zur n\u00e4chsten Runde.")
         return
     end
 
-    tableState.players[src] = {
-        hand       = {},
-        stand      = false,
-        bust       = false,
-        desiredBet = BASE_BET
-    }
-    broadcast(("[%d] hat sich an den Blackjack-Tisch gesetzt."):format(src))
+    state.players[src] = { seatIndex = seatIndex, hand = {}, stand = false, bust = false, desiredBet = BASE_BET }
+    playerTables[src] = tableId
+    broadcast(("[%d] sitzt jetzt an Tisch %s."):format(src, tostring(tableId)))
 
-    if not dealerSpawned[tableId] then
-        dealerSpawned[tableId] = true
-        TriggerClientEvent("pe_blackjack:spawnDealer", -1, tableId)
-    end
-
-    sendUIUpdate(false, true)
-    startWaitingTimer()
+    startWaitingTimer(tableId)
+    sendStateUpdate(tableId, false)
 end)
 RegisterNetEvent("pe_blackjack:seatLeave")
 AddEventHandler("pe_blackjack:seatLeave", function(tableId)
     local src = source
-
-    if not tableState.players[src] then
-        sendToPlayer(src, "Du bist nicht am Tisch.")
-        return
-    end
-
-    -- Wenn er mitten in der Runde aufsteht → UI schließen und Spieler aus Runde entfernen
-    if tableState.inRound then
-        TriggerClientEvent("pe_blackjack:updateUI", src, { action = "close" })
-    end
-
-    tableState.players[src] = nil
-    broadcast(("[%d] hat den Blackjack-Tisch verlassen."):format(src))
-
-    -- Wenn keiner mehr spielt → Runde abbrechen
-    if tableState.inRound and not anyActivePlayers() then
-        broadcast("Alle Spieler weg, Runde abgebrochen.")
-        tableState.inRound    = false
-        tableState.players    = {}
-        tableState.dealerHand = {}
-    elseif not tableState.inRound and anyActivePlayers() then
-        sendUIUpdate(false, true)
-    end
-end)
-
-
-AddEventHandler("playerDropped", function()
-    local src = source
-    if tableState.players[src] then
-        tableState.players[src] = nil
-        if tableState.inRound and not anyActivePlayers() then
-            broadcast("Alle Spieler weg, Runde abgebrochen.")
-            tableState.inRound    = false
-            tableState.players    = {}
-            tableState.dealerHand = {}
-        elseif not tableState.inRound and anyActivePlayers() then
-            sendUIUpdate(false, true)
-        end
-    end
-end)
-RegisterNetEvent("pe_blackjack:setBet")
-AddEventHandler("pe_blackjack:setBet", function(bet)
-    local src = source
-    local p = tableState.players[src]
-
-    if not p then
+    local state = tables[tableId]
+    if not state or not state.players[src] then
         sendToPlayer(src, "Du sitzt nicht am Tisch.")
         return
     end
 
-    if tableState.inRound then
+    if state.inRound then
+        sendToPlayer(src, "Du verlässt den Tisch während der Runde.")
+    end
+
+    state.players[src] = nil
+    playerTables[src] = nil
+    broadcast(("[%d] hat Tisch %s verlassen."):format(src, tostring(tableId)))
+
+    if state.inRound and not anyActivePlayers(state) then
+        state.inRound = false
+        state.phase = "idle"
+        state.dealerHand = {}
+        state.turnOrder = {}
+        state.currentTurnIndex = 0
+        TriggerClientEvent("pe_blackjack:roundEnded", -1, tableId)
+    elseif not state.inRound and anyActivePlayers(state) then
+        sendStateUpdate(tableId, false)
+    end
+end)
+AddEventHandler("playerDropped", function()
+    local src = source
+    local tableId = playerTables[src]
+    if not tableId then return end
+    local state = tables[tableId]
+    if not state then return end
+    state.players[src] = nil
+    playerTables[src] = nil
+    if state.inRound and not anyActivePlayers(state) then
+        state.inRound = false
+        state.phase = "idle"
+        state.dealerHand = {}
+        state.turnOrder = {}
+        state.currentTurnIndex = 0
+        TriggerClientEvent("pe_blackjack:roundEnded", -1, tableId)
+    elseif not state.inRound and anyActivePlayers(state) then
+        sendStateUpdate(tableId, false)
+    end
+end)
+RegisterNetEvent("pe_blackjack:setBet")
+AddEventHandler("pe_blackjack:setBet", function(tableId, bet)
+    local src = source
+    local state = tables[tableId]
+    if not state then return end
+    local p = state.players[src]
+    if not p then
+        sendToPlayer(src, "Du sitzt nicht am Tisch.")
+        return
+    end
+    if state.inRound then
         sendToPlayer(src, "Einsatz nur zwischen den Runden.")
         return
     end
 
-    bet = math.floor(bet)
-    if bet < 1 then bet = 1 end
-    if bet > 1000 then bet = 1000 end
-
+    bet = math.floor(bet or BASE_BET)
+    bet = math.max(1, math.min(1000, bet))
     p.desiredBet = bet
     sendToPlayer(src, ("Einsatz gesetzt: $%d"):format(bet))
-    sendUIUpdate(false, true)
+    sendStateUpdate(tableId, false)
 end)
 
+RegisterNetEvent("pe_blackjack:hit")
+AddEventHandler("pe_blackjack:hit", function(tableId)
+    local src = source
+    if not tableId then tableId = playerTables[src] end
+    if not tableId then return end
+    handleHit(src, tableId)
+end)
+
+RegisterNetEvent("pe_blackjack:stand")
+AddEventHandler("pe_blackjack:stand", function(tableId)
+    local src = source
+    if not tableId then tableId = playerTables[src] end
+    if not tableId then return end
+    handleStand(src, tableId)
+end)
+------------------------------------------------------------
+-- Debug commands (optional)
+------------------------------------------------------------
+RegisterCommand("bjstart", function(source, args)
+    local tableId = tonumber(args[1]) or playerTables[source] or 1
+    startRound(tableId, source)
+end, false)
+
+RegisterCommand("bjhit", function(source)
+    local tableId = playerTables[source] or 1
+    handleHit(source, tableId)
+end, false)
+
+RegisterCommand("bjstand", function(source)
+    local tableId = playerTables[source] or 1
+    handleStand(source, tableId)
+end, false)
